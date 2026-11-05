@@ -15,15 +15,39 @@ import java.util.Date
 import java.util.Locale
 import java.util.UUID
 
-data class Att(val type: String, val file: String) // img | audio | draw
+/** A piece of note content: text ("t") or an attachment ("img" | "draw" | "audio") placed inline. */
+data class Block(
+    val id: String, val type: String, val text: String = "", val file: String = "",
+    val w: Float = 1f, val align: Int = 1, val wave: String = "", val dur: Int = 0
+)
 data class Folder(val id: String, val name: String)
 data class Note(
-    val id: String, val title: String = "", val body: String = "", val folder: String = "",
+    val id: String, val title: String = "", val blocks: List<Block> = emptyList(), val folder: String = "",
     val pinned: Boolean = false, val priv: Boolean = false, val trashed: Boolean = false,
-    val created: Long = System.currentTimeMillis(), val updated: Long = created,
-    val atts: List<Att> = emptyList()
-)
+    val created: Long = System.currentTimeMillis(), val updated: Long = created
+) {
+    val body: String get() = blocks.filter { it.type == "t" }.joinToString("\n") { it.text }.trim()
+    val atts: List<Block> get() = blocks.filter { it.type != "t" }
+}
 data class Task(val id: String, val title: String, val due: Long = 0, val done: Boolean = false, val star: Boolean = false)
+
+/** Keeps a text block at the start, at the end and between any two attachments; merges adjacent text blocks. */
+fun normalizeBlocks(l: List<Block>): List<Block> {
+    val out = ArrayList<Block>()
+    for (b in l) {
+        if (b.type == "t") {
+            if (out.isNotEmpty() && out.last().type == "t") {
+                val a = out.last()
+                out[out.lastIndex] = a.copy(text = listOf(a.text, b.text).filter { it.isNotEmpty() }.joinToString("\n"))
+            } else out.add(b)
+        } else {
+            if (out.isEmpty() || out.last().type != "t") out.add(Block(UUID.randomUUID().toString().substring(0, 8), "t"))
+            out.add(b)
+        }
+    }
+    if (out.isEmpty() || out.last().type != "t") out.add(Block(UUID.randomUUID().toString().substring(0, 8), "t"))
+    return out
+}
 
 object Store {
     val notes = mutableStateListOf<Note>()
@@ -49,15 +73,16 @@ object Store {
             }
             o.optJSONArray("notes")?.let { a ->
                 for (i in 0 until a.length()) a.getJSONObject(i).let { j ->
-                    val at = ArrayList<Att>()
-                    j.optJSONArray("a")?.let { b ->
-                        for (k in 0 until b.length()) b.getJSONObject(k).let { at.add(Att(it.getString("t"), it.getString("f"))) }
+                    val bl = ArrayList<Block>()
+                    j.optJSONArray("b")?.let { b ->
+                        for (k in 0 until b.length()) b.getJSONObject(k).let {
+                            bl.add(Block(it.getString("i"), it.getString("t"), it.optString("x"), it.optString("f"), it.optDouble("w", 1.0).toFloat(), it.optInt("a", 1), it.optString("v"), it.optInt("d")))
+                        }
                     }
                     notes.add(
                         Note(
-                            j.getString("id"), j.optString("title"), j.optString("body"), j.optString("folder"),
-                            j.optBoolean("pin"), j.optBoolean("priv"), j.optBoolean("tr"),
-                            j.optLong("c"), j.optLong("u"), at
+                            j.getString("id"), j.optString("title"), bl, j.optString("folder"),
+                            j.optBoolean("pin"), j.optBoolean("priv"), j.optBoolean("tr"), j.optLong("c"), j.optLong("u")
                         )
                     )
                 }
@@ -77,9 +102,13 @@ object Store {
         o.put("notes", JSONArray().apply {
             notes.forEach { n ->
                 put(
-                    JSONObject().put("id", n.id).put("title", n.title).put("body", n.body).put("folder", n.folder)
+                    JSONObject().put("id", n.id).put("title", n.title).put("folder", n.folder)
                         .put("pin", n.pinned).put("priv", n.priv).put("tr", n.trashed).put("c", n.created).put("u", n.updated)
-                        .put("a", JSONArray().apply { n.atts.forEach { put(JSONObject().put("t", it.type).put("f", it.file)) } })
+                        .put("b", JSONArray().apply {
+                            n.blocks.forEach {
+                                put(JSONObject().put("i", it.id).put("t", it.type).put("x", it.text).put("f", it.file).put("w", it.w.toDouble()).put("a", it.align).put("v", it.wave).put("d", it.dur))
+                            }
+                        })
                 )
             }
         })
@@ -129,7 +158,7 @@ object Store {
 
 object Prefs {
     private fun sp(c: Context) = c.getSharedPreferences("p", 0)
-    fun svc(c: Context) = sp(c).getBoolean("svc", true)
+    fun svc(c: Context) = sp(c).getBoolean("svc", false)
     fun setSvc(c: Context, v: Boolean) = sp(c).edit().putBoolean("svc", v).apply()
     fun grid(c: Context) = sp(c).getBoolean("grid", true)
     fun setGrid(c: Context, v: Boolean) = sp(c).edit().putBoolean("grid", v).apply()
